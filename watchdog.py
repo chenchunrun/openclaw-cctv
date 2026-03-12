@@ -9,6 +9,7 @@ import signal
 import subprocess
 import sys
 import time
+import json
 from pathlib import Path
 
 from logger import AuditLogger
@@ -67,7 +68,19 @@ class Watchdog:
             return False
         try:
             text = SECURITY_MD_PATH.read_text(encoding="utf-8")
-            if "<!-- POLICY_BEGIN -->" not in text or "<!-- POLICY_END -->" not in text:
+            begin_marker = "<!-- POLICY_BEGIN -->"
+            end_marker = "<!-- POLICY_END -->"
+            if begin_marker not in text or end_marker not in text:
+                return False
+            segment = text.split(begin_marker, 1)[1].split(end_marker, 1)[0]
+            lines = [ln.rstrip() for ln in segment.strip().splitlines()]
+            if not lines or lines[0].strip() != "```json" or lines[-1].strip() != "```":
+                return False
+            policy = json.loads("\n".join(lines[1:-1]))
+            auth = policy.get("auth", {})
+            if str(auth.get("token_transport", "")).lower() != "env_only":
+                return False
+            if not auth.get("env_var_name") or not auth.get("hmac_key_file"):
                 return False
             if not AUTH_KEY_PATH.read_text(encoding="utf-8").strip():
                 return False

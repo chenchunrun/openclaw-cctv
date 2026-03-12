@@ -16,7 +16,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Set, Tuple
+from typing import Any, Dict, List, Set, Tuple, TypedDict
 
 from logger import AuditLogger
 
@@ -29,6 +29,13 @@ ALERT_PATH = Path("/var/log/openclaw-cctv/alerts.log")
 AUDIT_LOG_PATH = Path("/var/log/openclaw-cctv/audit.log")
 STATE_PATH = Path("/var/log/openclaw-cctv/state.sha256")
 KEY_PATH = Path("/etc/openclaw-cctv.key")
+
+
+class ProcessRow(TypedDict):
+    pid: int
+    ppid: int
+    uid: int
+    command: str
 
 
 class CCTVDaemon:
@@ -199,23 +206,24 @@ class CCTVDaemon:
         except Exception:
             return str(uid)
 
-    def _list_processes(self) -> List[Tuple[int, int, str]]:
-        output = self._run(["ps", "-axo", "pid=,uid=,command="])
-        items: List[Tuple[int, int, str]] = []
+    def _list_processes(self) -> List[ProcessRow]:
+        output = self._run(["ps", "-axo", "pid=,ppid=,uid=,command="])
+        items: List[ProcessRow] = []
         for line in output.splitlines():
             line = line.strip()
             if not line:
                 continue
-            parts = line.split(maxsplit=2)
-            if len(parts) < 3:
+            parts = line.split(maxsplit=3)
+            if len(parts) < 4:
                 continue
             try:
                 pid = int(parts[0])
-                uid = int(parts[1])
+                ppid = int(parts[1])
+                uid = int(parts[2])
             except ValueError:
                 continue
-            cmd = parts[2]
-            items.append((pid, uid, cmd))
+            cmd = parts[3]
+            items.append({"pid": pid, "ppid": ppid, "uid": uid, "command": cmd})
         return items
 
     def _is_target_process(self, cmd: str) -> bool:
@@ -223,7 +231,7 @@ class CCTVDaemon:
         cmd_lower = cmd.lower()
         return any(t.lower() in cmd_lower for t in targets)
 
-    def _collect_lsof_files_and_net(self, pid: int) -> Tuple[Set[str], Set[str]]:
+    def _collect_lsof_files_and_net(self, pid: int) -> tuple[Set[str], Set[str]]:
         files: Set[str] = set()
         nets: Set[str] = set()
         try:
@@ -283,6 +291,14 @@ class CCTVDaemon:
             return ""
         token = m.group(1) or m.group(2) or m.group(3) or ""
         return token.strip()
+
+    def _process_command_with_env(self, pid: int) -> str:
+        # On macOS `ps eww` includes process environment when available.
+        try:
+            raw = self._run(["ps", "eww", "-p", str(pid), "-o", "command="]).strip()
+            return raw
+        except Exception:
+            return ""
 
     def _cleanup_nonces(self) -> None:
         now_ms = int(time.time() * 1000)
@@ -371,7 +387,8 @@ class CCTVDaemon:
                     self._maybe_kill(pid)
                 return False
 
-            token = self._extract_token(cmd)
+            token_carrier = self._process_command_with_env(pid) or cmd
+            token = self._extract_token(token_carrier)
             if not token:
                 reason = "auth_required"
                 evt = self._write_event(
@@ -414,10 +431,33 @@ class CCTVDaemon:
 
         return True
 
-    def _check_forbidden_actions(self, process_rows: List[Tuple[int, int, str]]) -> None:
+    def _expand_target_pids(self, process_rows: List[ProcessRow]) -> Set[int]:
+        roots = {row["pid"] for row in process_rows if self._is_target_process(row["command"])}
+        if not roots:
+            return set()
+
+        children: Dict[int, Set[int]] = {}
+        for row in process_rows:
+            children.setdefault(row["ppid"], set()).add(row["pid"])
+
+        expanded = set(roots)
+        stack = list(roots)
+        while stack:
+            p = stack.pop()
+            for child in children.get(p, set()):
+                if child in expanded:
+                    continue
+                expanded.add(child)
+                stack.append(child)
+        return expanded
+
+    def _check_forbidden_actions(self, process_rows: List[ProcessRow], target_pids: Set[int]) -> None:
         forbidden_actions = self.rules.get("forbidden_actions", [])
-        for pid, uid, cmd in process_rows:
-            if not self._is_target_process(cmd):
+        for row in process_rows:
+            pid = row["pid"]
+            uid = row["uid"]
+            cmd = row["command"]
+            if pid not in target_pids:
                 continue
             for token in forbidden_actions:
                 if token in cmd:
@@ -427,7 +467,7 @@ class CCTVDaemon:
                         pid=pid,
                         user=user,
                         command=cmd,
-                        result="blocked_candidate",
+                        result="observed",
                         details={"token": token},
                     )
                     self._alert("forbidden action observed", event)
@@ -445,11 +485,15 @@ class CCTVDaemon:
                 self._alert("integrity file changed", event)
                 self.file_integrity[path] = new_hash
 
-    def _audit_targets(self, process_rows: List[Tuple[int, int, str]]) -> None:
+    def _audit_targets(self, process_rows: List[ProcessRow], target_pids: Set[int]) -> None:
         current_targets: Set[int] = set()
-        for pid, uid, cmd in process_rows:
-            if not self._is_target_process(cmd):
+        row_by_pid = {row["pid"]: row for row in process_rows}
+        for pid in sorted(target_pids):
+            row = row_by_pid.get(pid)
+            if row is None:
                 continue
+            uid = row["uid"]
+            cmd = row["command"]
 
             if not self._check_security_contract(pid, uid, cmd):
                 continue
@@ -528,13 +572,14 @@ class CCTVDaemon:
             details={"security_md": str(SECURITY_MD_PATH)},
         )
 
-        interval = int(self.rules.get("poll_interval_seconds", 2))
+        interval = max(1, int(self.rules.get("poll_interval_seconds", 2)))
         while True:
             try:
                 process_rows = self._list_processes()
-                self._check_forbidden_actions(process_rows)
+                target_pids = self._expand_target_pids(process_rows)
+                self._check_forbidden_actions(process_rows, target_pids)
                 self._check_file_integrity()
-                self._audit_targets(process_rows)
+                self._audit_targets(process_rows, target_pids)
                 self._write_heartbeat()
             except Exception as exc:
                 evt = self._write_event(
