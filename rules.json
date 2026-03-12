@@ -1,0 +1,31 @@
+{
+  "_license": "Apache-2.0",
+  "monitor_process": [
+    "openclaw"
+  ],
+  "poll_interval_seconds": 2,
+  "forbidden_files": [
+    "/etc/openclaw/security/SECURITY.md",
+    "/var/log/openclaw-cctv/*",
+    "/Library/Application Support/OpenClawCCTV/*"
+  ],
+  "forbidden_actions": [
+    "chflags",
+    "launchctl bootout system/com.openclaw.cctv",
+    "launchctl remove com.openclaw.cctv",
+    "rm -rf /var/log/openclaw-cctv",
+    "rm -rf /Library/Application Support/OpenClawCCTV",
+    "rm -f /etc/openclaw/security/SECURITY.md",
+    "cat /var/log/openclaw-cctv",
+    "tail -f /var/log/openclaw-cctv"
+  ],
+  "integrity_files": [
+    "/Library/Application Support/OpenClawCCTV/cctv.py",
+    "/Library/Application Support/OpenClawCCTV/watchdog.py",
+    "/Library/Application Support/OpenClawCCTV/logger.py",
+    "/Library/Application Support/OpenClawCCTV/rules.json",
+    "/Library/LaunchDaemons/com.openclaw.cctv.plist",
+    "/etc/openclaw/security/SECURITY.md"
+  ],
+  "alert_on_exfil": true
+}

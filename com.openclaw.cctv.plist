@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.openclaw.cctv</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>/Library/Application Support/OpenClawCCTV/watchdog.py</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/var/log/openclaw-cctv/launchd.out.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/var/log/openclaw-cctv/launchd.err.log</string>
+
+  <key>Umask</key>
+  <integer>23</integer>
+</dict>
+</plist>
